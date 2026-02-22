@@ -1,13 +1,15 @@
-# RAG Chatbot (Gemini + Local Documents)
+# RAG Chatbot (Gemini + Google Login)
 
-This is a separate project that answers questions from your own documents.
-It uses:
-- Gemini embeddings for retrieval
-- cosine similarity for top-k chunk search
-- Gemini chat model for grounded answers
-- Streamlit UI for upload + chat
+This Streamlit app provides document-grounded Q&A with Gemini, protected by Google (Gmail) login.
 
-## 1. Setup
+## Features
+- Google OAuth login gate
+- Upload documents: `.txt`, `.md`, `.pdf`, `.docx`
+- Build embedding index and retrieve relevant chunks
+- Gemini grounded answers with source snippet IDs
+- Adjustable `top_k` and `temperature` in UI
+
+## Setup
 
 ```bash
 cd rag_openai
@@ -17,59 +19,55 @@ python3 -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Set your key in `.env`:
+## Environment Variables
 
 ```bash
 GEMINI_API_KEY=your_gemini_api_key_here
 GEMINI_MODEL=auto
 GEMINI_EMBEDDING_MODEL=auto
+
+GOOGLE_CLIENT_ID=your_google_client_id
+GOOGLE_CLIENT_SECRET=your_google_client_secret
+GOOGLE_REDIRECT_URI=https://your-app-url.streamlit.app
+GOOGLE_STATE_SECRET=optional_long_random_string
+GOOGLE_ALLOWED_DOMAIN=
+GOOGLE_ALLOWED_EMAILS=
 ```
 
-## 2. Add Documents
+Notes:
+- Keep `GEMINI_MODEL=auto` and `GEMINI_EMBEDDING_MODEL=auto` for compatibility fallback.
+- `GOOGLE_ALLOWED_DOMAIN` and `GOOGLE_ALLOWED_EMAILS` are optional restrictions.
 
-Put your files in `docs/`:
-- `.txt`
-- `.md`
-- `.pdf`
-- `.docx`
+## Google OAuth Configuration
 
-`.doc` is not supported directly. Convert `.doc` to `.docx`, `.pdf`, or `.txt`.
+In Google Cloud Console (OAuth Client ID: Web application):
+- Authorized JavaScript origins:
+  - `https://<your-app>.streamlit.app`
+- Authorized redirect URIs:
+  - `https://<your-app>.streamlit.app`
+  - `https://<your-app>.streamlit.app/`
 
-Example file already exists at `docs/sample_policy.txt`.
+Use the exact same base URL in `GOOGLE_REDIRECT_URI`.
 
-## 3. Build Index
-
-```bash
-python3 ingest.py --docs docs --out index/index.json
-```
-
-## 4. Ask Questions (One-shot)
-
-```bash
-python3 chat.py --index index/index.json --question "What is the peak demand reduction target?"
-```
-
-## 5. Interactive Chat
-
-```bash
-python3 chat.py --index index/index.json
-```
-
-Type `exit` to quit.
-
-## 6. Streamlit Web UI
+## Run Locally
 
 ```bash
 streamlit run app.py
 ```
 
-In the UI:
-1. Upload docs (`.txt`, `.md`, `.pdf`, `.docx`)
-2. Click **Build Index**
-3. Ask questions in chat
+## Streamlit Cloud Deployment
 
-## Notes
+- Main file path: `app.py`
+- Add secrets in TOML format:
 
-- Answers are grounded in retrieved snippets only.
-- If not found, it says it could not find it in the provided docs.
-- Re-run `ingest.py` whenever documents change.
+```toml
+GEMINI_API_KEY = "..."
+GEMINI_MODEL = "auto"
+GEMINI_EMBEDDING_MODEL = "auto"
+GOOGLE_CLIENT_ID = "..."
+GOOGLE_CLIENT_SECRET = "..."
+GOOGLE_REDIRECT_URI = "https://<your-app>.streamlit.app"
+GOOGLE_STATE_SECRET = "long-random-secret"
+GOOGLE_ALLOWED_DOMAIN = ""
+GOOGLE_ALLOWED_EMAILS = ""
+```

@@ -1,4 +1,11 @@
 import os
+import base64
+import hmac
+import json
+import secrets
+import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import streamlit as st
@@ -11,6 +18,10 @@ except Exception:
 
 from chat import ask_once, load_index
 from ingest import SUPPORTED_EXTENSIONS, build_index
+
+AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+TOKEN_URL = "https://oauth2.googleapis.com/token"
+USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 
 
 def ensure_dirs() -> None:
@@ -29,9 +40,195 @@ def save_uploads(uploaded_files) -> list[str]:
     return saved
 
 
+def _pick_first(value):
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
+
+
+def _b64url_decode(data: str) -> bytes:
+    padded = data + "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(padded.encode("utf-8"))
+
+
+def _google_auth_config() -> dict:
+    return {
+        "client_id": os.getenv("GOOGLE_CLIENT_ID", "").strip(),
+        "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", "").strip(),
+        "redirect_uri": os.getenv("GOOGLE_REDIRECT_URI", "").strip(),
+        "state_secret": os.getenv("GOOGLE_STATE_SECRET", "").strip(),
+        "allowed_domain": os.getenv("GOOGLE_ALLOWED_DOMAIN", "").strip().lower(),
+        "allowed_emails": {
+            e.strip().lower()
+            for e in os.getenv("GOOGLE_ALLOWED_EMAILS", "").split(",")
+            if e.strip()
+        },
+    }
+
+
+def _state_signing_key(cfg: dict) -> str:
+    return cfg["state_secret"] or cfg["client_secret"]
+
+
+def _create_state_token(cfg: dict, ttl_seconds: int = 600) -> str:
+    payload = {
+        "nonce": secrets.token_urlsafe(16),
+        "iat": int(time.time()),
+        "exp": int(time.time()) + ttl_seconds,
+    }
+    payload_json = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    payload_b64 = _b64url(payload_json)
+    sig = hmac.new(
+        _state_signing_key(cfg).encode("utf-8"),
+        payload_b64.encode("utf-8"),
+        digestmod="sha256",
+    ).digest()
+    return f"{payload_b64}.{_b64url(sig)}"
+
+
+def _verify_state_token(cfg: dict, token: str) -> bool:
+    try:
+        payload_b64, sig_b64 = token.split(".", 1)
+        expected_sig = hmac.new(
+            _state_signing_key(cfg).encode("utf-8"),
+            payload_b64.encode("utf-8"),
+            digestmod="sha256",
+        ).digest()
+        got_sig = _b64url_decode(sig_b64)
+        if not hmac.compare_digest(expected_sig, got_sig):
+            return False
+        payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
+        now = int(time.time())
+        return now <= int(payload.get("exp", 0))
+    except Exception:
+        return False
+
+
+def _build_auth_url(client_id: str, redirect_uri: str, state: str) -> str:
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "prompt": "select_account",
+    }
+    return f"{AUTH_URL}?{urllib.parse.urlencode(params)}"
+
+
+def _post_form(url: str, form_data: dict, headers: dict | None = None) -> dict:
+    data = urllib.parse.urlencode(form_data).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    if headers:
+        for k, v in headers.items():
+            req.add_header(k, v)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _get_json(url: str, headers: dict | None = None) -> dict:
+    req = urllib.request.Request(url, method="GET")
+    if headers:
+        for k, v in headers.items():
+            req.add_header(k, v)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _exchange_code_for_user(code: str, client_id: str, client_secret: str, redirect_uri: str) -> dict:
+    token_payload = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }
+    token = _post_form(TOKEN_URL, token_payload)
+    access_token = token.get("access_token")
+    if not access_token:
+        raise ValueError("Google token exchange failed: no access token.")
+    return _get_json(USERINFO_URL, headers={"Authorization": f"Bearer {access_token}"})
+
+
+def _render_google_login() -> bool:
+    cfg = _google_auth_config()
+    if not cfg["client_id"] or not cfg["client_secret"] or not cfg["redirect_uri"]:
+        st.error(
+            "Google OAuth is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI in secrets/env."
+        )
+        st.stop()
+
+    params = st.query_params
+    code = _pick_first(params.get("code"))
+    state = _pick_first(params.get("state"))
+
+    if "oauth_state" not in st.session_state:
+        st.session_state.oauth_state = _create_state_token(cfg)
+
+    if code:
+        valid_state = bool(state) and (
+            state == st.session_state.get("oauth_state") or _verify_state_token(cfg, state)
+        )
+        if not valid_state:
+            st.warning("Login session expired. Please sign in again.")
+            st.query_params.clear()
+            st.session_state.oauth_state = _create_state_token(cfg)
+            st.rerun()
+        try:
+            user = _exchange_code_for_user(
+                code=code,
+                client_id=cfg["client_id"],
+                client_secret=cfg["client_secret"],
+                redirect_uri=cfg["redirect_uri"],
+            )
+        except Exception as exc:
+            st.error(f"Google login failed: {exc}")
+            st.stop()
+
+        email = str(user.get("email", "")).lower()
+        domain = email.split("@")[-1] if "@" in email else ""
+        allowed_domain = cfg["allowed_domain"]
+        allowed_emails = cfg["allowed_emails"]
+        if allowed_domain and domain != allowed_domain:
+            st.error("Access denied: your domain is not allowed.")
+            st.stop()
+        if allowed_emails and email not in allowed_emails:
+            st.error("Access denied: your email is not allowlisted.")
+            st.stop()
+
+        st.session_state.authenticated = True
+        st.session_state.user = {
+            "name": user.get("name") or email,
+            "email": email,
+            "picture": user.get("picture", ""),
+        }
+        st.query_params.clear()
+        st.rerun()
+
+    st.title("Login Required")
+    st.caption("Sign in with your Google account to access the RAG application.")
+    auth_url = _build_auth_url(
+        cfg["client_id"],
+        cfg["redirect_uri"],
+        st.session_state["oauth_state"],
+    )
+    st.link_button("Sign in with Google", auth_url, use_container_width=True)
+    return False
+
+
 def main() -> None:
     load_dotenv()
     st.set_page_config(page_title="RAG Chatbot", page_icon="📄", layout="wide")
+
+    if not st.session_state.get("authenticated", False):
+        if not _render_google_login():
+            return
+
     st.title("RAG Chatbot (Gemini + Your Documents)")
     st.caption("Grounded answers from your local files")
 
@@ -49,6 +246,13 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Settings")
+        user = st.session_state.get("user", {})
+        st.caption(f"Signed in as: `{user.get('email', 'unknown')}`")
+        if st.button("Logout"):
+            for k in ["authenticated", "user", "history", "oauth_state"]:
+                st.session_state.pop(k, None)
+            st.query_params.clear()
+            st.rerun()
         top_k = st.slider("Top K Chunks", min_value=2, max_value=10, value=4)
         temperature = st.slider("Temperature", min_value=0.0, max_value=1.5, value=0.2, step=0.1)
         st.write(f"Chat model: `{model}`")

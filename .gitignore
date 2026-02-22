@@ -1,7 +1,7 @@
 .env
+.venv/
 index/
+docs/uploaded/
 __pycache__/
 *.pyc
-.venv/
-docs/uploaded/
 .DS_Store
