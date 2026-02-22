@@ -2,8 +2,12 @@ import os
 from pathlib import Path
 
 import streamlit as st
-from dotenv import load_dotenv
 import google.generativeai as genai
+try:
+    from dotenv import load_dotenv
+except Exception:
+    def load_dotenv(*args, **kwargs):
+        return False
 
 from chat import ask_once, load_index
 from ingest import SUPPORTED_EXTENSIONS, build_index

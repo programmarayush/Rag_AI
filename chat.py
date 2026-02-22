@@ -4,8 +4,12 @@ import os
 from pathlib import Path
 
 import numpy as np
-from dotenv import load_dotenv
 import google.generativeai as genai
+try:
+    from dotenv import load_dotenv
+except Exception:
+    def load_dotenv(*args, **kwargs):
+        return False
 
 
 SYSTEM_PROMPT = """You are a document-grounded assistant.

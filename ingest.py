@@ -4,10 +4,14 @@ import os
 from pathlib import Path
 from typing import Iterable
 
-from dotenv import load_dotenv
 from docx import Document
 import google.generativeai as genai
 from pypdf import PdfReader
+try:
+    from dotenv import load_dotenv
+except Exception:
+    def load_dotenv(*args, **kwargs):
+        return False
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx"}
 
